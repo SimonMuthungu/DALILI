@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import './App.css';
 
 const SYMPTOM_DEFINITIONS = [
@@ -58,6 +58,7 @@ function App() {
   const [result, setResult] = useState(null);
   const [history, setHistory] = useState([]);
   const [recording, setRecording] = useState(false);
+  const recognitionRef = useRef(null);
 
   useEffect(() => {
     fetchHistory();
@@ -87,17 +88,32 @@ function App() {
     });
   };
 
-  // Proof of concept voice recording
-  const startRecording = () => {
+  // Proxy to the backend STT to bypass browser-specific WebSpeech API errors
+  const toggleRecording = async () => {
+    if (recording) {
+      // Backend records a single phrase, so we just return if busy
+      return;
+    }
+
     setRecording(true);
-    // Simulate recording delay, then "transcribe" what they might say.
-    setTimeout(() => {
-      setFormData({
-        ...formData,
-        voice_transcript: "I have been coughing for weeks, feels like my chest hurts, I lost a lot of weight and I noticed some strange bleeding."
-      });
+    try {
+      const res = await fetch('http://localhost:8000/api/transcribe-backend');
+      const data = await res.json();
+      
+      if (data.transcript) {
+        setFormData(prev => ({
+          ...prev,
+          voice_transcript: prev.voice_transcript ? prev.voice_transcript + " " + data.transcript : data.transcript
+        }));
+      } else if (data.error) {
+        alert("Transcription Error: " + data.error);
+      }
+    } catch (error) {
+      console.error("Backend STT error:", error);
+      alert("Failed to connect to backend STT server.");
+    } finally {
       setRecording(false);
-    }, 3000);
+    }
   };
 
   const handleSubmit = async (e) => {
@@ -139,9 +155,9 @@ function App() {
           <button 
             type="button" 
             className={`mic-btn ${recording ? 'recording' : ''}`}
-            onClick={startRecording}
+            onClick={toggleRecording}
           >
-            {recording ? '🔴 Listening...' : '🎤 Tap to Speak'}
+            {recording ? '🔴 Listening (Tap to Stop)...' : '🎤 Tap to Speak'}
           </button>
           
           <textarea

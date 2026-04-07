@@ -3,6 +3,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import sqlite3
 import random
+import os
+import joblib
+import numpy as np
+import speech_recognition as sr
 
 app = FastAPI()
 
@@ -13,6 +17,23 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+model = None
+model_features = []
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+model_path = os.path.join(BASE_DIR, "symptom_model.pkl")
+features_path = os.path.join(BASE_DIR, "model_features.pkl")
+
+try:
+    if os.path.exists(model_path) and os.path.exists(features_path):
+        model = joblib.load(model_path)
+        model_features = joblib.load(features_path)
+        print("ML model loaded successfully.")
+    else:
+        print("ML model not found. Will use heuristic fallback only.")
+except Exception as e:
+    print(f"Error loading ML model: {e}")
 
 # Database setup
 def init_db():
@@ -62,22 +83,54 @@ class SymptomRequest(BaseModel):
 def assess_risk(req: SymptomRequest):
     risk_level = "Low"
     action = "Rest, hydrate, and maintain a healthy diet. Monitor any changes in your body. Please note: This is not a formal diagnosis."
+    used_ml_model = False
     
-    # Analyze structured symptoms for Emergencies
-    if req.chest_indrawing or req.bluish_lips or req.coughing_blood or req.unexplained_bleeding:
-        risk_level = "Emergency"
-        action = "Urgent: Visit the nearest emergency facility immediately. These are critical signs of severe respiratory distress or advanced complications. Please note: This is not a diagnosis."
-    # Analyze for High Risk (Cancer / Severe Malaria)
-    elif req.unexplained_weight_loss or req.lumps_swelling or req.persistent_pain or req.difficulty_swallowing or req.bowel_changes or (req.fever and req.severe_headache and req.nausea_vomiting):
-        risk_level = "High"
-        action = "Warning: These symptoms require immediate medical screening to rule out severe conditions like Cancer or Complicated Malaria. Please consult a specialist. This is not a diagnosis."
-    # Analyze for Moderate Risk
-    elif req.persistent_cough or req.night_sweats or req.shortness_of_breath or req.hoarseness or req.chronic_indigestion:
-        risk_level = "Moderate"
-        action = "Visit a clinic for imaging and tests. Persistent or unusal symptoms need medical evaluation. Please note: This is not a diagnosis."
-    elif req.fever or req.fatigue or req.chills_shivering or req.loss_of_appetite or req.joint_muscle_pain:
-        risk_level = "Moderate"
-        action = "Consider seeing a doctor for a checkup, especially if symptoms persist or worsen. Monitor closely. Please note: This is not a diagnosis."
+    # Try ML model first
+    if model is not None and model_features:
+        try:
+            req_dict = req.dict()
+            X_input = [[1 if req_dict.get(f) else 0 for f in model_features]]
+            
+            # Get probabilities for each class
+            probs = model.predict_proba(X_input)[0]
+            max_prob = max(probs)
+            
+            # Predict only if confidence is 50% or higher
+            if max_prob >= 0.5:
+                pred_index = np.argmax(probs)
+                risk_level = model.classes_[pred_index]
+                used_ml_model = True
+                print(f"ML Model used. Prediction: {risk_level} with probability {max_prob:.2f}")
+                
+                # Assign actions based on ML risk level
+                if risk_level == "Emergency":
+                    action = "Urgent: Visit the nearest emergency facility immediately. Please note: This is an ML assessment, not a formal diagnosis."
+                elif risk_level == "High":
+                    action = "Warning: These symptoms require immediate medical screening to rule out severe conditions. Please note: This is an ML assessment."
+                elif risk_level == "Moderate":
+                    action = "Visit a clinic for tests. Persistent or unexpected symptoms need medical evaluation. Please note: This is an ML assessment."
+                else:
+                    action = "Rest, hydrate, and monitor changes. See a doctor if symptoms persist. Please note: This is an ML assessment."
+        except Exception as e:
+            print(f"ML Model prediction error: {e}")
+
+    if not used_ml_model:
+        print("Falling back to rule-based heuristic.")
+        # Analyze structured symptoms for Emergencies
+        if req.chest_indrawing or req.bluish_lips or req.coughing_blood or req.unexplained_bleeding:
+            risk_level = "Emergency"
+            action = "Urgent: Visit the nearest emergency facility immediately. These are critical signs of severe respiratory distress or advanced complications. Please note: This is not a diagnosis."
+        # Analyze for High Risk (Cancer / Severe Malaria)
+        elif req.unexplained_weight_loss or req.lumps_swelling or req.persistent_pain or req.difficulty_swallowing or req.bowel_changes or (req.fever and req.severe_headache and req.nausea_vomiting):
+            risk_level = "High"
+            action = "Warning: These symptoms require immediate medical screening to rule out severe conditions like Cancer or Complicated Malaria. Please consult a specialist. This is not a diagnosis."
+        # Analyze for Moderate Risk
+        elif req.persistent_cough or req.night_sweats or req.shortness_of_breath or req.hoarseness or req.chronic_indigestion:
+            risk_level = "Moderate"
+            action = "Visit a clinic for imaging and tests. Persistent or unusal symptoms need medical evaluation. Please note: This is not a diagnosis."
+        elif req.fever or req.fatigue or req.chills_shivering or req.loss_of_appetite or req.joint_muscle_pain:
+            risk_level = "Moderate"
+            action = "Consider seeing a doctor for a checkup, especially if symptoms persist or worsen. Monitor closely. Please note: This is not a diagnosis."
 
     # Parse voice transcript for keywords (simulating AI NLP)
     transcript = req.voice_transcript.lower()
@@ -129,6 +182,27 @@ def assess_risk(req: SymptomRequest):
         "recommended_action": action,
         "symptoms": symptoms_list
     }
+
+@app.get("/api/transcribe-backend")
+def transcribe_backend():
+    r = sr.Recognizer()
+    try:
+        with sr.Microphone() as source:
+            # simple ambient noise adjustment
+            r.adjust_for_ambient_noise(source, duration=0.5)
+            # Listen to the user's mic for a phrase
+            audio = r.listen(source, timeout=15, phrase_time_limit=20)
+            # Send to Google Speech Recognition 
+            text = r.recognize_google(audio)
+            return {"transcript": text}
+    except sr.WaitTimeoutError:
+        return {"error": "Timeout. Could not hear anything."}
+    except sr.UnknownValueError:
+        return {"error": "Could not understand the audio."}
+    except sr.RequestError as e:
+        return {"error": f"Speech API error: {e}"}
+    except Exception as e:
+        return {"error": f"Audio source error: {e}"}
 
 @app.get("/api/assessments")
 def get_assessments():
