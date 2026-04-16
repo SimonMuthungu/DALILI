@@ -15,7 +15,7 @@ features = [
 X = []
 y = []
 
-# Generate synthetic dataset to bootstrap the ML model from the existing heuristics
+# Train ML model
 for i in range(5000):
     row = np.random.randint(0, 2, size=len(features))
     req = dict(zip(features, row))
